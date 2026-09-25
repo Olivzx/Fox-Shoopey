@@ -1,78 +1,90 @@
--- Fox Shoopey — Supabase schema (production blueprint)
+-- Fox Shoopey — schema de produção
+-- A migration foi aplicada no projeto xotsezpsvtmofrmtfflq.
 create extension if not exists pgcrypto;
 
-create table if not exists public.products (
-  id uuid primary key default gen_random_uuid(),
-  title text not null,
-  category text not null,
-  store text not null,
-  emoji text not null default '🛍️',
-  price numeric(12,2) not null check (price >= 0),
-  old_price numeric(12,2) not null check (old_price >= 0),
-  discount integer not null default 0 check (discount >= 0 and discount <= 100),
-  affiliate_url text not null,
-  tags text[] not null default '{}',
-  rating numeric(2,1) not null default 0,
-  review_count integer not null default 0,
-  featured boolean not null default false,
-  active boolean not null default true,
-  created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now()
+create table public.marketplaces (
+  id uuid primary key default gen_random_uuid(), name text not null unique, slug text not null unique,
+  logo_url text, website_url text, is_active boolean not null default true, created_at timestamptz not null default now()
+);
+create table public.categories (
+  id uuid primary key default gen_random_uuid(), name text not null unique, slug text not null unique,
+  icon text, image_url text, is_active boolean not null default true, created_at timestamptz not null default now()
+);
+create table public.products (
+  id uuid primary key default gen_random_uuid(), name text not null, slug text not null unique, description text,
+  image_url text, gallery_urls text[] not null default '{}', price numeric(12,2), old_price numeric(12,2),
+  discount_percent numeric(5,2), rating numeric(2,1), review_count integer not null default 0 check (review_count >= 0),
+  affiliate_url text not null, marketplace_id uuid references public.marketplaces(id) on delete restrict,
+  category_id uuid references public.categories(id) on delete set null, is_featured boolean not null default false,
+  is_active boolean not null default true, created_at timestamptz not null default now(), updated_at timestamptz not null default now()
+);
+create table public.recommendations (
+  id uuid primary key default gen_random_uuid(), name text not null, comment text not null, avatar_url text,
+  rating smallint not null default 5 check (rating between 1 and 5), is_published boolean not null default true, created_at timestamptz not null default now()
+);
+create table public.banners (
+  id uuid primary key default gen_random_uuid(), title text not null, subtitle text, image_url text, link_url text,
+  is_active boolean not null default true, sort_order integer not null default 0, created_at timestamptz not null default now()
+);
+create table public.admin_profiles (
+  user_id uuid primary key references auth.users(id) on delete cascade, role text not null default 'admin' check (role='admin'),
+  display_name text, created_at timestamptz not null default now()
+);
+create table public.click_events (
+  id uuid primary key default gen_random_uuid(), product_id uuid references public.products(id) on delete set null,
+  marketplace_id uuid references public.marketplaces(id) on delete set null, source text, referrer text,
+  user_agent text, created_at timestamptz not null default now()
 );
 
-create table if not exists public.recommendations (
-  id uuid primary key default gen_random_uuid(),
-  author_name text not null,
-  body text not null,
-  rating integer not null check (rating between 1 and 5),
-  approved boolean not null default false,
-  created_at timestamptz not null default now()
-);
+create index products_active_featured_idx on public.products(is_active,is_featured);
+create index products_category_idx on public.products(category_id);
+create index products_marketplace_idx on public.products(marketplace_id);
+create index click_events_product_idx on public.click_events(product_id);
+create index click_events_created_at_idx on public.click_events(created_at desc);
 
-create table if not exists public.admin_profiles (
-  user_id uuid primary key references auth.users(id) on delete cascade,
-  role text not null default 'admin' check (role = 'admin'),
-  created_at timestamptz not null default now()
-);
+create or replace function public.set_updated_at() returns trigger language plpgsql as $$ begin new.updated_at=now(); return new; end; $$;
+drop trigger if exists products_set_updated_at on public.products;
+create trigger products_set_updated_at before update on public.products for each row execute function public.set_updated_at();
 
+create or replace function public.is_admin() returns boolean language sql stable security definer set search_path=public as $$
+  select exists(select 1 from public.admin_profiles where user_id=auth.uid());
+$$;
+
+alter table public.marketplaces enable row level security;
+alter table public.categories enable row level security;
 alter table public.products enable row level security;
 alter table public.recommendations enable row level security;
+alter table public.banners enable row level security;
 alter table public.admin_profiles enable row level security;
+alter table public.click_events enable row level security;
 
-create policy "public can read active products" on public.products
-for select to anon, authenticated using (active = true);
+create policy "public can view active marketplaces" on public.marketplaces for select to anon,authenticated using (is_active=true or public.is_admin());
+create policy "admins manage marketplaces" on public.marketplaces for all to authenticated using (public.is_admin()) with check (public.is_admin());
+create policy "public can view active categories" on public.categories for select to anon,authenticated using (is_active=true or public.is_admin());
+create policy "admins manage categories" on public.categories for all to authenticated using (public.is_admin()) with check (public.is_admin());
+create policy "public can view active products" on public.products for select to anon,authenticated using (is_active=true or public.is_admin());
+create policy "admins manage products" on public.products for all to authenticated using (public.is_admin()) with check (public.is_admin());
+create policy "public can view published recommendations" on public.recommendations for select to anon,authenticated using (is_published=true or public.is_admin());
+create policy "admins manage recommendations" on public.recommendations for all to authenticated using (public.is_admin()) with check (public.is_admin());
+create policy "public can view active banners" on public.banners for select to anon,authenticated using (is_active=true or public.is_admin());
+create policy "admins manage banners" on public.banners for all to authenticated using (public.is_admin()) with check (public.is_admin());
+create policy "admins can view admin profiles" on public.admin_profiles for select to authenticated using (public.is_admin() or user_id=auth.uid());
+create policy "admins manage admin profiles" on public.admin_profiles for all to authenticated using (public.is_admin()) with check (public.is_admin());
+create policy "public can record clicks" on public.click_events for insert to anon,authenticated with check (true);
+create policy "admins view clicks" on public.click_events for select to authenticated using (public.is_admin());
 
-create policy "authenticated admins can read products" on public.products
-for select to authenticated
-using (exists (select 1 from public.admin_profiles a where a.user_id = auth.uid()));
+create or replace function public.record_affiliate_click(p_product_id uuid,p_source text default null,p_referrer text default null,p_user_agent text default null)
+returns uuid language plpgsql security definer set search_path=public as $$
+declare v_marketplace_id uuid; v_id uuid;
+begin
+  select marketplace_id into v_marketplace_id from public.products where id=p_product_id and is_active=true;
+  if v_marketplace_id is null then raise exception 'Produto não encontrado ou inativo'; end if;
+  insert into public.click_events(product_id,marketplace_id,source,referrer,user_agent)
+  values(p_product_id,v_marketplace_id,p_source,p_referrer,left(p_user_agent,1000)) returning id into v_id;
+  return v_id;
+end; $$;
+revoke all on function public.record_affiliate_click(uuid,text,text,text) from public;
+grant execute on function public.record_affiliate_click(uuid,text,text,text) to anon,authenticated;
 
-create policy "authenticated admins can insert products" on public.products
-for insert to authenticated
-with check (exists (select 1 from public.admin_profiles a where a.user_id = auth.uid()));
-
-create policy "authenticated admins can update products" on public.products
-for update to authenticated
-using (exists (select 1 from public.admin_profiles a where a.user_id = auth.uid()))
-with check (exists (select 1 from public.admin_profiles a where a.user_id = auth.uid()));
-
-create policy "public can read approved recommendations" on public.recommendations
-for select to anon, authenticated using (approved = true);
-
-create policy "public can submit recommendation" on public.recommendations
-for insert to anon, authenticated with check (approved = false);
-
-create policy "admins can moderate recommendations" on public.recommendations
-for all to authenticated
-using (exists (select 1 from public.admin_profiles a where a.user_id = auth.uid()))
-with check (exists (select 1 from public.admin_profiles a where a.user_id = auth.uid()));
-
-create policy "admins can read own admin profile" on public.admin_profiles
-for select to authenticated using (user_id = auth.uid());
-
-create or replace function public.set_updated_at()
-returns trigger language plpgsql as $$
-begin new.updated_at = now(); return new; end; $$;
-
-drop trigger if exists products_updated_at on public.products;
-create trigger products_updated_at before update on public.products
-for each row execute function public.set_updated_at();
+insert into public.marketplaces(name,slug) values ('Shopee','shopee'),('Mercado Livre','mercado-livre'),('Amazon','amazon'),('AliExpress','aliexpress') on conflict(slug) do nothing;
+insert into public.categories(name,slug,icon) values ('Eletrônicos','eletronicos','smartphone'),('Casa','casa','home'),('Moda','moda','shirt'),('Beleza','beleza','sparkles'),('Games','games','gamepad-2'),('Ofertas','ofertas','tag') on conflict(slug) do nothing;
